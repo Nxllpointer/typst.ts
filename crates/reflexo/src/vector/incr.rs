@@ -17,7 +17,7 @@ pub struct IncrDocClient {
     /// Optional source mapping data.
     pub source_mapping_data: Vec<SourceMappingNode>,
     /// Optional page source mapping references.
-    pub page_source_mappping: LayoutSourceMapping,
+    pub page_source_mapping: LayoutSourceMapping,
 }
 
 impl IncrDocClient {
@@ -33,7 +33,7 @@ impl IncrDocClient {
                     self.source_mapping_data = data;
                 }
                 ModuleMetadata::PageSourceMapping(data) => {
-                    self.page_source_mappping = data.take();
+                    self.page_source_mapping = data.take();
                 }
                 _ => {}
             }
@@ -62,7 +62,7 @@ impl IncrDocClient {
     }
 }
 
-fn access_slice<'a, T>(v: &'a [T], idx: usize, kind: &'static str, pos: usize) -> ZResult<&'a T> {
+fn access_slice<'a, T>(v: &'a [T], idx: usize, kind: &'static str, pos: usize) -> Result<&'a T> {
     v.get(idx).ok_or_else(
         || error_once!("out of bound access", pos: pos, kind: kind, idx: idx, actual: v.len()),
     )
@@ -94,21 +94,21 @@ impl<'a> IncrDocClientKern<'a> {
     }
 
     /// Get the source location of the given path.
-    pub fn source_span(&self, path: &[u32]) -> ZResult<Option<String>> {
+    pub fn source_span(&self, path: &[u32]) -> Result<Option<String>> {
         const SOURCE_MAPPING_TYPE_TEXT: u32 = 0;
         const SOURCE_MAPPING_TYPE_GROUP: u32 = 1;
         const SOURCE_MAPPING_TYPE_IMAGE: u32 = 2;
         const SOURCE_MAPPING_TYPE_SHAPE: u32 = 3;
         const SOURCE_MAPPING_TYPE_PAGE: u32 = 4;
 
-        if self.0.page_source_mappping.is_empty() {
+        if self.0.page_source_mapping.is_empty() {
             return Ok(None);
         }
 
         let mut index_item: Option<&SourceMappingNode> = None;
 
         let source_mapping = self.0.source_mapping_data.as_slice();
-        let page_sources = self.0.page_source_mappping[0]
+        let page_sources = self.0.page_source_mapping[0]
             .source_mapping(&self.0.doc.module)
             .unwrap();
         let page_sources = page_sources.source_mapping();

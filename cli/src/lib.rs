@@ -9,11 +9,19 @@ pub mod utils;
 pub mod version;
 
 use core::fmt;
-use std::{borrow::Cow, path::PathBuf};
+use std::{
+    borrow::Cow,
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 
-use chrono::{DateTime, Utc};
 use clap::{builder::ValueParser, ArgAction, Args, Command, Parser, Subcommand, ValueEnum};
-use reflexo_typst::build_info::VERSION;
+use reflexo_typst::{
+    build_info::VERSION, vfs::WorkspaceResolver, DiagnosticHandler, ImmutPath, TypstFileId,
+    MEMORY_MAIN_ENTRY,
+};
+use typst::syntax::VirtualPath;
+use utils::current_dir;
 use version::VersionFormat;
 
 /// The character typically used to separate path components
@@ -147,6 +155,94 @@ pub struct CompileOnceArgs {
 
     #[clap(skip)]
     pub extra_embedded_fonts: Vec<Cow<'static, [u8]>>,
+
+    /// The root of workspace of the compilation.
+    #[clap(skip)]
+    pub parsed_entry: OnceLock<ImmutPath>,
+
+    /// The root of workspace of the compilation.
+    #[clap(skip)]
+    pub main_id: OnceLock<TypstFileId>,
+
+    /// The output directory of the compilation.
+    #[clap(skip)]
+    pub parsed_output: OnceLock<ImmutPath>,
+}
+
+impl CompileOnceArgs {
+    pub fn is_stdin(&self) -> bool {
+        self.entry == "-"
+    }
+
+    pub fn root(&self) -> &ImmutPath {
+        self.parsed_entry.get_or_init(|| {
+            let root = Path::new(&self.workspace);
+
+            if root.is_absolute() {
+                root.into()
+            } else {
+                current_dir().join(root).into()
+            }
+        })
+    }
+
+    pub fn main_id(&self) -> &TypstFileId {
+        self.main_id.get_or_init(|| {
+            if self.is_stdin() {
+                *MEMORY_MAIN_ENTRY
+            } else {
+                let root = self.root();
+                let entry = Path::new(&self.entry);
+
+                let entry = if entry.is_absolute() {
+                    entry.to_owned()
+                } else {
+                    current_dir().join(entry)
+                };
+
+                let path = match entry.strip_prefix(root) {
+                    Ok(rel) => VirtualPath::new(rel),
+                    Err(_) => clap::Error::raw(
+                        clap::error::ErrorKind::InvalidValue,
+                        format!(
+                            "entry file path must be in workspace directory: {workspace_dir}\n",
+                            workspace_dir = root.display()
+                        ),
+                    )
+                    .exit(),
+                };
+
+                WorkspaceResolver::workspace_file(Some(root), path)
+            }
+        })
+    }
+
+    pub fn output_dir(&self) -> &ImmutPath {
+        self.parsed_output.get_or_init(|| {
+            let input = self.main_id();
+
+            if self.output.is_empty() {
+                if self.is_stdin() {
+                    current_dir().into()
+                } else {
+                    input
+                        .vpath()
+                        .as_rooted_path()
+                        .parent()
+                        .unwrap_or_else(|| {
+                            clap::Error::raw(
+                                clap::error::ErrorKind::InvalidValue,
+                                "entry file has no parent",
+                            )
+                            .exit()
+                        })
+                        .into()
+                }
+            } else {
+                Path::new(&self.output).into()
+            }
+        })
+    }
 }
 
 /// Parses key/value pairs split by the first equal sign.
@@ -174,10 +270,9 @@ pub struct ExportArgs {
     #[clap(
         long = "creation-timestamp",
         env = "SOURCE_DATE_EPOCH",
-        value_name = "UNIX_TIMESTAMP",
-        value_parser = parse_source_date_epoch,
+        value_name = "UNIX_TIMESTAMP"
     )]
-    pub creation_timestamp: Option<DateTime<Utc>>,
+    pub creation_timestamp: Option<i64>,
 }
 
 #[derive(Default, Debug, Clone, Parser)]
@@ -212,6 +307,15 @@ pub struct CompileArgs {
         value_parser = clap::value_parser!(DiagnosticFormat)
     )]
     pub diagnostic_format: DiagnosticFormat,
+}
+
+impl CompileArgs {
+    pub fn diagnostics_handler(&self) -> DiagnosticHandler {
+        DiagnosticHandler {
+            diagnostic_format: self.diagnostic_format.into(),
+            print_compile_status: self.watch,
+        }
+    }
 }
 
 /// Processes an input file to extract provided metadata
@@ -373,12 +477,4 @@ impl fmt::Display for DiagnosticFormat {
 pub fn get_cli(sub_command_required: bool) -> Command {
     let cli = Command::new("$").disable_version_flag(true);
     Opts::augment_args(cli).subcommand_required(sub_command_required)
-}
-
-/// Parses a UNIX timestamp according to <https://reproducible-builds.org/specs/source-date-epoch/>
-fn parse_source_date_epoch(raw: &str) -> Result<DateTime<Utc>, String> {
-    let timestamp: i64 = raw
-        .parse()
-        .map_err(|err| format!("timestamp must be decimal integer ({err})"))?;
-    DateTime::from_timestamp(timestamp, 0).ok_or_else(|| "timestamp out of range".to_string())
 }

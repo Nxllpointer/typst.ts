@@ -1,7 +1,7 @@
 {
   "name": "enhanced-typst-svg",
   "private": true,
-  "version": "0.5.1",
+  "version": "0.5.5-rc7",
   "description": "Typst svg enhancement",
   "author": "Myriad Dreamin <camiyoru@gmail.com>",
   "license": "Apache-2.0",
@@ -10,10 +10,9 @@
     "renderer"
   ],
   "repository": "https://github.com/Myriad-Dreamin/typst.ts",
-  "main": "dist/index.js",
   "files": [
-    "dist/index.js",
-    "dist/index.min.js"
+    "dist/index.min.js",
+    "dist/style.css"
   ],
   "peerDependencies": {},
   "scripts": {

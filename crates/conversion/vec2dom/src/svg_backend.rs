@@ -113,7 +113,7 @@ impl SvgBackend {
 }
 
 impl TypstPageElem {
-    pub fn attach_svg(
+    pub fn attach_html(
         ctx: &mut DomContext<'_, '_>,
         g: SvgGraphicsElement,
         data: Fingerprint,
@@ -154,14 +154,14 @@ impl TypstPageElem {
                     };
 
                     // skip translate g
-                    let child = Self::attach_svg(
+                    let child = Self::attach_html(
                         ctx,
                         should_ch
                             .first_element_child()
                             .ok_or_else(|| {
                                 web_sys::console::log_2(
                                     &should_ch,
-                                    &format!("Invalid group translate: {:?}", item).into(),
+                                    &format!("Invalid group translate: {item:?}").into(),
                                 );
                                 panic!("Invalid group translate: {}", fg.as_svg_id("g"));
                             })
@@ -182,7 +182,7 @@ impl TypstPageElem {
                     .ok_or_else(|| {
                         web_sys::console::log_2(
                             &g,
-                            &format!("Invalid item reference: {:?}", item).into(),
+                            &format!("Invalid item reference: {item:?}").into(),
                         );
                         panic!("Invalid item reference: {}", fg.as_svg_id("g"));
                     })
@@ -201,13 +201,13 @@ impl TypstPageElem {
                     &g,
                 );
 
-                let child = Self::attach_svg(
+                let child = Self::attach_html(
                     ctx,
                     ch.first_element_child()
                         .ok_or_else(|| {
                             web_sys::console::log_2(
                                 &g,
-                                &format!("Invalid item translate: {:?}", item).into(),
+                                &format!("Invalid item translate: {item:?}").into(),
                             );
                             panic!("Invalid item translate: {}", fg.as_svg_id("g"));
                         })
@@ -230,12 +230,13 @@ impl TypstPageElem {
             VecItem::ContentHint(_) => TypstDomExtra::ContentHint(ContentHintElem { hint: ' ' }),
             VecItem::Link(_) => TypstDomExtra::Link(LinkElem {}),
             VecItem::Path(_) => TypstDomExtra::Path(PathElem {}),
-            VecItem::Html(_) => TypstDomExtra::Html(HtmlElem {}),
+            VecItem::SizedRawHtml(_) => TypstDomExtra::RawHtml(HtmlElem {}),
             VecItem::None
             | VecItem::ColorTransform(_)
             | VecItem::Color32(_)
             | VecItem::Gradient(_)
-            | VecItem::Pattern(_) => {
+            | VecItem::Pattern(_)
+            | VecItem::Html(_) => {
                 todo!()
             }
         };
@@ -266,9 +267,9 @@ pub static FETCH_BBOX_TIMES: std::sync::atomic::AtomicUsize =
 static BBOX_SANITIZER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 impl TypstElem {
-    /// Repaint svg API will retrun a new viewport if it is updated.
+    /// Repaint svg API will return a new viewport if it is updated.
     ///
-    /// The idea is that: the element visible before will be overrided by the
+    /// The idea is that: the element visible before will be overridden by the
     /// latter ones, so we should update the viewport to the union of all
     /// previous ones and repaint the latter elements accordingly.
     fn repaint_svg(

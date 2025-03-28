@@ -19,7 +19,7 @@ impl Vec2BBoxPass {
         }
 
         let bbox = self.bbox_of_(module, v, ts);
-        println!("bbox_of({v:?}, {ts:?}) = {bbox:?}");
+        eprintln!("bbox_of({v:?}, {ts:?}) = {bbox:?}");
         self.bbox_caches.insert((v, ts), bbox);
         bbox
     }
@@ -40,7 +40,7 @@ impl Vec2BBoxPass {
             }
             VecItem::Image(ImageItem { size, .. })
             | VecItem::Link(LinkItem { size, .. })
-            | VecItem::Html(HtmlItem { size, .. }) => self.rect(*size, ts),
+            | VecItem::SizedRawHtml(SizedRawHtmlItem { size, .. }) => self.rect(*size, ts),
             // todo: I'm writing this in my leg
             VecItem::Text(t) => {
                 let width = t.width();
@@ -53,6 +53,7 @@ impl Vec2BBoxPass {
             | VecItem::Pattern(..)
             | VecItem::Gradient(..)
             | VecItem::Color32(..)
+            | VecItem::Html(..)
             | VecItem::None => None,
         }
     }

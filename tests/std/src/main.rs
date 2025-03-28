@@ -9,10 +9,10 @@ static PRESET_HEADER: &str = r#"
 "#;
 
 fn main() -> anyhow::Result<()> {
-    let mainfest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let test_dir = &mainfest_dir.join("../../../typst/tests/typ");
-    let rewrite_dir = mainfest_dir.join("../../fuzzers/corpora");
-    let std_artifact_path = mainfest_dir.join("../../tests/common/src/std_artifact.rs");
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let test_dir = &manifest_dir.join("../../../typst/tests/typ");
+    let rewrite_dir = manifest_dir.join("../../fuzzers/corpora");
+    let std_artifact_path = manifest_dir.join("../../tests/common/src/std_artifact.rs");
 
     let mut test_files = WalkDir::new(test_dir)
         .into_iter()
@@ -40,7 +40,7 @@ fn main() -> anyhow::Result<()> {
             Some(src_path)
         })
         .flat_map(|src_path| -> anyhow::Result<Vec<(String, String)>> {
-            // println!("src_path={}", src_path.display());
+            // eprintln!("src_path={}", src_path.display());
 
             // read source
             let text = std::fs::read_to_string(&src_path)?;
@@ -84,7 +84,7 @@ fn main() -> anyhow::Result<()> {
             for (i, part) in parts.iter().enumerate() {
                 let file_name = rewrite_path.file_stem().unwrap().to_string_lossy();
                 let file_name = format!("{file_name}_{i:02}");
-                println!("scanned {cat:10} {file_name}...");
+                eprintln!("scanned {cat:10} {file_name}...");
 
                 let rewrite_path = rewrite_path.with_file_name(format!("{file_name}.typ"));
 

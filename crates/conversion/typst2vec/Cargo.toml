@@ -28,6 +28,7 @@ rayon.workspace = true
 rkyv = { workspace = true, optional = true }
 tiny-skia-path.workspace = true
 svgtypes.workspace = true
+image.workspace = true
 
 [features]
 
@@ -40,3 +41,6 @@ no-content-hint = []
 glyph2vec = []
 debug-gc = []
 item-dashmap = ["reflexo/item-dashmap"]
+
+[lints]
+workspace = true

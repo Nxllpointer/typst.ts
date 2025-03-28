@@ -2,15 +2,15 @@ use std::fmt::Write;
 use std::hash::{Hash, Hasher};
 use std::{ops::Deref, sync::Arc};
 
-pub use ttf_parser::GlyphId;
+use reflexo::hash::{item_hash128, HashedTrait, StaticHash128};
+use reflexo::ImmutStr;
+use typst::foundations::{Bytes, Smart};
 use typst::text::Font;
-// use typst::geom::Axes;
-use typst::visualize::{Image as TypstImage, RasterFormat};
-
-use reflexo::hash::item_hash128;
-use reflexo::{HashedTrait, ImmutStr, StaticHash128};
+use typst::visualize::{ExchangeFormat, Image as TypstImage, RasterImage};
 
 use super::ligature::resolve_ligature;
+
+pub use ttf_parser::GlyphId;
 
 /// IGlyphProvider extracts the font data from the font.
 /// Note (Possibly block unsafe): If a [`Font`] is dummy (lazy loaded),
@@ -110,12 +110,17 @@ impl IGlyphProvider for FontGlyphProvider {
         // convert to typst's image format
         // todo: verify result
         let glyph_image = TypstImage::new(
-            raster.data.into(),
-            RasterFormat::Png.into(),
+            RasterImage::new(
+                Bytes::new(raster.data.to_vec()),
+                ExchangeFormat::Png,
+                Smart::Auto,
+            )
+            .ok()?,
             // Axes::new(raster.width as u32, raster.height as u32),
             None,
-        )
-        .ok()?;
+            // todo: scaling
+            Smart::Auto,
+        );
 
         Some((glyph_image, raster.x, raster.y))
     }
@@ -168,19 +173,19 @@ struct SvgOutlineBuilder(pub String);
 
 impl ttf_parser::OutlineBuilder for SvgOutlineBuilder {
     fn move_to(&mut self, x: f32, y: f32) {
-        write!(&mut self.0, "M {} {} ", x, y).unwrap();
+        write!(&mut self.0, "M {x} {y} ").unwrap();
     }
 
     fn line_to(&mut self, x: f32, y: f32) {
-        write!(&mut self.0, "L {} {} ", x, y).unwrap();
+        write!(&mut self.0, "L {x} {y} ").unwrap();
     }
 
     fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
-        write!(&mut self.0, "Q {} {} {} {} ", x1, y1, x, y).unwrap();
+        write!(&mut self.0, "Q {x1} {y1} {x} {y} ").unwrap();
     }
 
     fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
-        write!(&mut self.0, "C {} {} {} {} {} {} ", x1, y1, x2, y2, x, y).unwrap();
+        write!(&mut self.0, "C {x1} {y1} {x2} {y2} {x} {y} ").unwrap();
     }
 
     fn close(&mut self) {

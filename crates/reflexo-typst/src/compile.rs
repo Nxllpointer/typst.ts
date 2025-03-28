@@ -4,64 +4,61 @@
 
 use std::{
     collections::HashSet,
-    ops::Deref,
     path::Path,
     sync::{Arc, OnceLock},
 };
 
-use reflexo_vfs::notify::UpstreamUpdateEvent;
-use reflexo_world::{EntryReader, Revising, TaskInputs};
+use reflexo::error::prelude::*;
+use reflexo::typst::{TypstHtmlDocument, TypstPagedDocument};
+use tinymist_world::{ConfigTask, OptionDocumentTask, ProjectInsId, WorldComputeGraph};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::{exporter::GenericExporter, ExportSignal, TypstDocument};
-use crate::{
-    features::{FeatureSet, WITH_COMPILING_STATUS_FEATURE},
-    vfs::notify::{FilesystemEvent, MemoryEvent, NotifyMessage},
-    watch_deps,
-    world::{CompilerFeat, CompilerUniverse, CompilerWorld},
-    CompileEnv, CompileReport, CompileSnapshot, CompiledArtifact, ConsoleDiagReporter, WorldDeps,
-};
-
 use crate::task::CacheTask;
+use crate::vfs::notify::{FilesystemEvent, MemoryEvent, NotifyMessage, UpstreamUpdateEvent};
+use crate::vfs::FsProvider;
+use crate::world::{CompilerFeat, CompilerUniverse, EntryReader, RevisingUniverse, TaskInputs};
+use crate::{watch::watch_deps, ExportSignal, TypstDocument};
+use crate::{CompileReport, CompileSnapshot, WorldDeps};
 
 pub trait CompilationHandle<F: CompilerFeat>: Send + Sync + 'static {
     fn status(&self, revision: usize, rep: CompileReport);
-    fn notify_compile(&self, res: &CompiledArtifact<F>, rep: CompileReport);
+    // res: &CompiledArtifact<F>, rep: CompileReport
+    fn notify_compile(&self, g: &Arc<WorldComputeGraph<F>>);
 }
 
 impl<F: CompilerFeat + Send + Sync + 'static> CompilationHandle<F>
     for std::marker::PhantomData<fn(F)>
 {
     fn status(&self, _revision: usize, _: CompileReport) {}
-    fn notify_compile(&self, _: &CompiledArtifact<F>, _: CompileReport) {}
+    fn notify_compile(&self, _g: &Arc<WorldComputeGraph<F>>) {}
 }
 
-pub enum SucceededArtifact<F: CompilerFeat> {
-    Compiled(CompiledArtifact<F>),
-    Suspend(CompileSnapshot<F>),
-}
+// pub enum CompiledArtifact<F: CompilerFeat> {
+//     Compiled(CompiledArtifact<F>),
+//     Suspend(CompileSnapshot<F>),
+// }
 
-impl<F: CompilerFeat> SucceededArtifact<F> {
-    pub fn success_doc(&self) -> Option<Arc<TypstDocument>> {
-        match self {
-            SucceededArtifact::Compiled(artifact) => artifact.success_doc(),
-            SucceededArtifact::Suspend(snapshot) => snapshot.success_doc.clone(),
-        }
-    }
+// impl<F: CompilerFeat> CompiledArtifact<F> {
+//     pub fn success_doc(&self) -> Option<TypstDocument> {
+//         match self {
+//             CompiledArtifact::Compiled(artifact) => artifact.success_doc(),
+//             CompiledArtifact::Suspend(snapshot) =>
+// snapshot.success_doc.clone(),         }
+//     }
 
-    pub fn world(&self) -> &Arc<CompilerWorld<F>> {
-        match self {
-            SucceededArtifact::Compiled(artifact) => &artifact.world,
-            SucceededArtifact::Suspend(snapshot) => &snapshot.world,
-        }
-    }
-}
+//     pub fn world(&self) -> &Arc<CompilerWorld<F>> {
+//         match self {
+//             CompiledArtifact::Compiled(artifact) => &artifact.world,
+//             CompiledArtifact::Suspend(snapshot) => &snapshot.world,
+//         }
+//     }
+// }
 
 pub enum Interrupt<F: CompilerFeat> {
     /// Compile anyway.
     Compile,
     /// Compiled from computing thread.
-    Compiled(CompiledArtifact<F>),
+    Compiled(Arc<WorldComputeGraph<F>>),
     /// Change the watching entry.
     ChangeTask(TaskInputs),
     /// Request compiler to respond a snapshot without needing to wait latest
@@ -69,7 +66,7 @@ pub enum Interrupt<F: CompilerFeat> {
     SnapshotRead(oneshot::Sender<CompileSnapshot<F>>),
     /// Request compiler to respond a snapshot with at least a compilation
     /// happens on or after current revision.
-    CurrentRead(oneshot::Sender<SucceededArtifact<F>>),
+    CurrentRead(oneshot::Sender<Arc<WorldComputeGraph<F>>>),
     /// Memory file changes.
     Memory(MemoryEvent),
     /// File system event.
@@ -141,7 +138,6 @@ struct TaggedMemoryEvent {
 
 pub struct CompileServerOpts<F: CompilerFeat> {
     pub compile_handle: Arc<dyn CompilationHandle<F>>,
-    pub feature_set: FeatureSet,
     pub cache: CacheTask,
 }
 
@@ -149,7 +145,6 @@ impl<F: CompilerFeat + Send + Sync + 'static> Default for CompileServerOpts<F> {
     fn default() -> Self {
         Self {
             compile_handle: Arc::new(std::marker::PhantomData),
-            feature_set: Default::default(),
             cache: Default::default(),
         }
     }
@@ -172,13 +167,9 @@ pub struct CompileActor<F: CompilerFeat> {
     /// Estimated latest set of shadow files.
     estimated_shadow_files: HashSet<Arc<Path>>,
     /// The latest compiled document.
-    pub(crate) latest_doc: Option<Arc<TypstDocument>>,
-    /// The latest successly compiled document.
-    latest_success_doc: Option<Arc<TypstDocument>>,
-    /// feature set for compile_once mode.
-    once_feature_set: Arc<FeatureSet>,
-    /// Shared feature set for watch mode.
-    watch_feature_set: Arc<FeatureSet>,
+    pub(crate) latest_doc: Option<Arc<WorldComputeGraph<F>>>,
+    /// The latest successful document.
+    pub(crate) latest_success_doc: Option<TypstDocument>,
 
     /// Channel for sending interrupts to the compiler actor.
     intr_tx: mpsc::UnboundedSender<Interrupt<F>>,
@@ -202,7 +193,6 @@ impl<F: CompilerFeat + Send + Sync + 'static> CompileActor<F> {
         intr_rx: mpsc::UnboundedReceiver<Interrupt<F>>,
         CompileServerOpts {
             compile_handle,
-            feature_set,
             cache: cache_evict,
         }: CompileServerOpts<F>,
     ) -> Self {
@@ -219,10 +209,6 @@ impl<F: CompilerFeat + Send + Sync + 'static> CompileActor<F> {
             estimated_shadow_files: Default::default(),
             latest_doc: None,
             latest_success_doc: None,
-            once_feature_set: Arc::new(feature_set.clone()),
-            watch_feature_set: Arc::new(
-                feature_set.configure(&WITH_COMPILING_STATUS_FEATURE, true),
-            ),
 
             intr_tx,
             intr_rx,
@@ -250,15 +236,17 @@ impl<F: CompilerFeat + Send + Sync + 'static> CompileActor<F> {
         self
     }
 
-    fn make_env(&self, feature_set: Arc<FeatureSet>) -> CompileEnv {
-        CompileEnv::default().configure_shared(feature_set)
-    }
-
     /// Launches the compiler actor.
-    pub async fn run(mut self) -> bool {
+    pub async fn run(mut self) -> Result<bool> {
         if !self.enable_watch {
-            let artifact = self.compile_once().await;
-            return artifact.doc.is_ok();
+            // todo: once flag
+            let g = self.compile_once().await;
+
+            let report = g.get::<ConfigTask<CompileReport>>().transpose()?;
+            let report = report.as_deref();
+            let is_success = matches!(report, Some(CompileReport::CompileSuccess(..)));
+
+            return Ok(is_success);
         }
 
         let (dep_tx, dep_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -315,31 +303,25 @@ impl<F: CompilerFeat + Send + Sync + 'static> CompileActor<F> {
 
         log_send_error("settle_notify", dep_tx.send(NotifyMessage::Settle));
         log::info!("CompileActor: exited");
-        true
+        Ok(true)
     }
 
-    fn snapshot(&self, is_once: bool, reason: CompileReasons) -> CompileSnapshot<F> {
+    fn snapshot(&self, reason: CompileReasons) -> CompileSnapshot<F> {
         let world = self.verse.snapshot();
-        let env = self.make_env(if is_once {
-            self.once_feature_set.clone()
-        } else {
-            self.watch_feature_set.clone()
-        });
         CompileSnapshot {
-            world: Arc::new(world.clone()),
-            env: env.clone(),
-            flags: ExportSignal {
+            id: ProjectInsId::PRIMARY,
+            world,
+            signal: ExportSignal {
                 by_entry_update: reason.by_entry_update,
                 by_mem_events: reason.by_memory_events,
                 by_fs_events: reason.by_fs_events,
             },
-            doc_state: Arc::new(OnceLock::new()),
             success_doc: self.latest_success_doc.clone(),
         }
     }
 
     /// Compile the document once.
-    pub async fn compile_once(&mut self) -> CompiledArtifact<F> {
+    pub async fn compile_once(&mut self) -> Arc<WorldComputeGraph<F>> {
         self.run_compile(reason_by_entry_change(), &mut vec![], true)
             .unwrap()
     }
@@ -348,14 +330,14 @@ impl<F: CompilerFeat + Send + Sync + 'static> CompileActor<F> {
     fn run_compile(
         &mut self,
         reason: CompileReasons,
-        curr_reads: &mut Vec<oneshot::Sender<SucceededArtifact<F>>>,
+        curr_reads: &mut Vec<oneshot::Sender<Arc<WorldComputeGraph<F>>>>,
         is_once: bool,
-    ) -> Option<CompiledArtifact<F>> {
+    ) -> Option<Arc<WorldComputeGraph<F>>> {
         self.suspended_reason.see(reason);
         let reason = std::mem::take(&mut self.suspended_reason);
         let start = reflexo::time::now();
 
-        let compiling = self.snapshot(is_once, reason);
+        let compiling = self.snapshot(reason);
         self.watch_snap = OnceLock::new();
         self.watch_snap.get_or_init(|| compiling.clone());
 
@@ -363,7 +345,7 @@ impl<F: CompilerFeat + Send + Sync + 'static> CompileActor<F> {
             self.suspended_reason.see(reason);
 
             for reader in curr_reads.drain(..) {
-                let _ = reader.send(SucceededArtifact::Suspend(compiling.clone()));
+                let _ = reader.send(WorldComputeGraph::new(compiling.clone()));
             }
             return None;
         }
@@ -376,7 +358,6 @@ impl<F: CompilerFeat + Send + Sync + 'static> CompileActor<F> {
         self.compiling = true;
 
         let h = self.compile_handle.clone();
-        let curr_reads = std::mem::take(curr_reads);
 
         // todo unwrap main id
         let id = compiling.world.main_id().unwrap();
@@ -385,27 +366,11 @@ impl<F: CompilerFeat + Send + Sync + 'static> CompileActor<F> {
         h.status(revision, CompileReport::Stage(id, "compiling", start));
 
         let compile = move || {
-            let compiled = compiling.compile();
+            let compiling = WorldComputeGraph::new(compiling);
 
-            for reader in curr_reads {
-                let _ = reader.send(SucceededArtifact::Compiled(compiled.clone()));
-            }
+            h.notify_compile(&compiling);
 
-            let elapsed = start.elapsed().unwrap_or_default();
-            let rep = match &compiled.doc {
-                Ok(..) => CompileReport::CompileSuccess(id, compiled.warnings.clone(), elapsed),
-                Err(err) => CompileReport::CompileError(id, err.clone(), elapsed),
-            };
-
-            let _ = ConsoleDiagReporter::default().export(
-                compiled.world.deref(),
-                Arc::new((compiled.env.features.clone(), rep.clone())),
-            );
-
-            // todo: we need to check revision for really concurrent compilation
-            h.notify_compile(&compiled, rep);
-
-            compiled
+            compiling
         };
 
         if is_once {
@@ -420,32 +385,57 @@ impl<F: CompilerFeat + Send + Sync + 'static> CompileActor<F> {
         }
     }
 
-    fn process_compile(&mut self, artifact: CompiledArtifact<F>, send: impl Fn(CompilerResponse)) {
+    fn process_compile(
+        &mut self,
+        artifact: Arc<WorldComputeGraph<F>>,
+        send: impl Fn(CompilerResponse),
+    ) {
         self.compiling = false;
 
-        let w = &artifact.world;
+        let w = &artifact.snap.world;
 
         let compiled_revision = w.revision().get();
         if self.committed_revision >= compiled_revision {
             return;
         }
 
-        let doc = artifact.doc.ok();
+        let doc = {
+            let paged = artifact
+                .get::<OptionDocumentTask<TypstPagedDocument>>()
+                .transpose()
+                .ok()
+                .flatten()
+                .and_then(|e| e.as_ref().clone());
+            let html = artifact
+                .get::<OptionDocumentTask<TypstHtmlDocument>>()
+                .transpose()
+                .ok()
+                .flatten()
+                .and_then(|e| e.as_ref().clone());
+
+            if let Some(paged) = paged {
+                Some(TypstDocument::Paged(paged))
+            } else {
+                html.map(TypstDocument::Html)
+            }
+        };
 
         // Update state.
         self.committed_revision = compiled_revision;
-        self.latest_doc.clone_from(&doc);
+        self.latest_doc = Some(artifact.clone());
         if doc.is_some() {
-            self.latest_success_doc.clone_from(&self.latest_doc);
+            self.latest_success_doc = doc;
         }
 
         // Notify the new file dependencies.
         let mut deps = vec![];
-        artifact
-            .world
-            .iter_dependencies(&mut |dep| deps.push(dep.clone()));
+        w.iter_dependencies(&mut |dep| {
+            if let Ok(x) = w.file_path(dep).and_then(|e| e.to_err()) {
+                deps.push(x.into())
+            }
+        });
         send(CompilerResponse::Notify(NotifyMessage::SyncDependency(
-            deps,
+            Box::new(deps),
         )));
 
         // Trigger an evict task.
@@ -459,7 +449,9 @@ impl<F: CompilerFeat + Send + Sync + 'static> CompileActor<F> {
         match event {
             Interrupt::Compile => {
                 // Increment the revision anyway.
-                self.verse.increment_revision(|_| {});
+                self.verse.increment_revision(|verse| {
+                    verse.flush();
+                });
 
                 reason_by_entry_change()
             }
@@ -468,14 +460,14 @@ impl<F: CompilerFeat + Send + Sync + 'static> CompileActor<F> {
                 if self
                     .watch_snap
                     .get()
-                    .is_some_and(|e| e.world.revision() < *self.verse.revision.read())
+                    .is_some_and(|e| e.world.revision() < self.verse.revision)
                 {
                     self.watch_snap = OnceLock::new();
                 }
 
                 let _ = task.send(
                     self.watch_snap
-                        .get_or_init(|| self.snapshot(false, no_reason()))
+                        .get_or_init(|| self.snapshot(no_reason()))
                         .clone(),
                 );
                 no_reason()
@@ -503,7 +495,7 @@ impl<F: CompilerFeat + Send + Sync + 'static> CompileActor<F> {
                     if self.suspended {
                         log::info!("CompileActor: removing diag");
                         self.compile_handle
-                            .status(self.verse.revision.get_mut().get(), CompileReport::Suspend);
+                            .status(self.verse.revision.get(), CompileReport::Suspend);
                     }
 
                     // Reset the watch state and document state.
@@ -572,7 +564,7 @@ impl<F: CompilerFeat + Send + Sync + 'static> CompileActor<F> {
                         // Actual a delayed memory event.
                         reason = reason_by_mem();
                     }
-                    verse.notify_fs_event(event)
+                    verse.vfs().notify_fs_event(event)
                 });
 
                 reason
@@ -589,7 +581,7 @@ impl<F: CompilerFeat + Send + Sync + 'static> CompileActor<F> {
 
     /// Apply delayed memory changes to underlying compiler.
     fn apply_delayed_memory_changes(
-        verse: &mut Revising<CompilerUniverse<F>>,
+        verse: &mut RevisingUniverse<F>,
         dirty_shadow_logical_tick: &mut usize,
         event: &mut FilesystemEvent,
     ) -> Option<()> {
@@ -613,25 +605,18 @@ impl<F: CompilerFeat + Send + Sync + 'static> CompileActor<F> {
     }
 
     /// Apply memory changes to underlying compiler.
-    fn apply_memory_changes(verse: &mut Revising<CompilerUniverse<F>>, event: MemoryEvent) {
+    fn apply_memory_changes(verse: &mut RevisingUniverse<F>, event: MemoryEvent) {
+        let mut vfs = verse.vfs();
         if matches!(event, MemoryEvent::Sync(..)) {
-            verse.reset_shadow();
+            vfs.reset_shadow();
         }
         match event {
             MemoryEvent::Update(event) | MemoryEvent::Sync(event) => {
-                for removes in event.removes {
-                    let _ = verse.unmap_shadow(&removes);
+                for path in event.removes {
+                    let _ = vfs.unmap_shadow(&path);
                 }
-                for (p, t) in event.inserts {
-                    let insert_file = match t.content().cloned() {
-                        Ok(content) => content,
-                        Err(err) => {
-                            log::error!("CompileActor: read memory file at {p:?}: {err}");
-                            continue;
-                        }
-                    };
-
-                    let _ = verse.map_shadow(&p, insert_file);
+                for (path, snap) in event.inserts {
+                    let _ = vfs.map_shadow(&path, snap);
                 }
             }
         }

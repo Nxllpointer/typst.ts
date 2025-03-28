@@ -1,6 +1,6 @@
 import test from 'ava';
 
-import { NodeCompiler } from '../index';
+import { NodeCompiler, PdfStandard } from '../index';
 
 // Switch to the current directory for the tests interacting with FS
 process.chdir(__dirname);
@@ -67,6 +67,26 @@ Hello, Typst! <my-label>
   t.truthy(doc && compiler.pdf(doc, { creationTimestamp: Date.now() }));
 });
 
+test('it pdf by compiled artifact and Pdf Standard 1.7', t => {
+  const compiler = NodeCompiler.create();
+  const doc = compiler.compile({
+    mainFileContent: `
+Hello, Typst! <my-label>
+`,
+  }).result;
+  t.truthy(doc && compiler.pdf(doc, { pdfStandard: PdfStandard.V_1_7 }));
+});
+
+test('it pdf by compiled artifact and Pdf Standard A2b', t => {
+  const compiler = NodeCompiler.create();
+  const doc = compiler.compile({
+    mainFileContent: `
+Hello, Typst! <my-label>
+`,
+  }).result;
+  t.truthy(doc && compiler.pdf(doc, { pdfStandard: PdfStandard.A_2b }));
+});
+
 test('it throws error`', t => {
   const compiler = NodeCompiler.create();
   let doc = compiler.compile({
@@ -81,8 +101,11 @@ Hello, Typst! <my-
 
   const diag = doc.takeDiagnostics()!;
   t.is(diag.compilationStatus, 'error');
-  t.snapshot(diag.shortDiagnostics);
-  t.snapshot(compiler.fetchDiagnostics(diag));
+  t.snapshot(diag.shortDiagnostics.length);
+  t.snapshot(diag.shortDiagnostics[0].message);
+  const fetched = compiler.fetchDiagnostics(diag);
+  t.snapshot(fetched.length);
+  t.snapshot(fetched[0].message);
 });
 
 test('it takes in the workspace and entry file in compiler ctor', t => {

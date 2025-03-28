@@ -1,37 +1,38 @@
 use std::fmt::Display;
 use std::{io, io::Write, sync::Arc};
 
+use reflexo::error::prelude::*;
+use reflexo::typst::Bytes;
+use tinymist_world::{CompilerFeat, WorldComputable, WorldComputeGraph};
+use typst::diag::FileError;
 use typst::syntax::{LinkedNode, Source, SyntaxKind, Tag};
-use typst::{
-    diag::{At, FileError},
-    syntax::Span,
-};
+use typst::World;
 
-use crate::Transformer;
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct ExportAstTask;
 
-#[derive(Debug, Clone, Default)]
-pub struct AstExporter {}
+pub struct AstExport;
 
-impl<W> Transformer<(Arc<typst::model::Document>, W)> for AstExporter
-where
-    W: std::io::Write,
-{
-    fn export(
-        &self,
-        world: &dyn typst::World,
-        (_output, writer): (Arc<typst::model::Document>, W),
-    ) -> typst::diag::SourceResult<()> {
-        let mut writer = std::io::BufWriter::new(writer);
+impl<F: CompilerFeat> WorldComputable<F> for AstExport {
+    type Output = Option<Bytes>;
 
-        let src = world.source(world.main()).at(Span::detached())?;
+    fn compute(graph: &Arc<WorldComputeGraph<F>>) -> Result<Self::Output> {
+        let world = &graph.snap.world;
+        let mut writer = std::io::BufWriter::new(Vec::new());
+
+        let src = world
+            .source(world.main())
+            .context_ut("failed to get main")?;
         let path = src.id().vpath().as_rootless_path();
         dump_ast(&path.display().to_string(), &src, &mut writer)
             .map_err(|e| FileError::from_io(e, path))
-            .at(Span::detached())?;
+            .context_ut("failed to dump ast")?;
 
         writer.flush().unwrap();
 
-        Ok(())
+        let inner = writer.into_inner().context_ut("failed to write ast")?;
+
+        Ok(Some(Bytes::new(inner)))
     }
 }
 
@@ -52,7 +53,7 @@ const MARKED: ansi_term::Color = ansi_term::Color::RGB(0x7d, 0xcf, 0xff);
 
 impl<W: io::Write> AstWriter<'_, W> {
     fn write_num_repr<T: Display>(&mut self, sk: SyntaxKind, ast: T) -> Option<()> {
-        self.painted(NUMBER, format!("Num({:?}, {})", sk, ast));
+        self.painted(NUMBER, format!("Num({sk:?}, {ast})"));
         Some(())
     }
 
@@ -65,27 +66,27 @@ impl<W: io::Write> AstWriter<'_, W> {
         if let Some(hl) = typst::syntax::highlight(ast) {
             match hl {
                 Tag::Comment => {
-                    self.painted(COMMENT, format!("Ct::{:?}", k));
+                    self.painted(COMMENT, format!("Ct::{k:?}"));
                     return;
                 }
                 Tag::Escape => {
-                    self.w.write_fmt(format_args!("Escape::{:?}", k)).unwrap();
+                    self.w.write_fmt(format_args!("Escape::{k:?}")).unwrap();
                     return;
                 }
                 Tag::Keyword => {
-                    self.painted(KEYWORD, format!("Kw::{:?}", k));
+                    self.painted(KEYWORD, format!("Kw::{k:?}"));
                     return;
                 }
                 Tag::Operator => {
-                    self.painted(OPERATOR, format!("Op::{:?}", k));
+                    self.painted(OPERATOR, format!("Op::{k:?}"));
                     return;
                 }
                 Tag::Punctuation => {
-                    self.painted(PUNC, format!("Punc::{:?}", k));
+                    self.painted(PUNC, format!("Punc::{k:?}"));
                     return;
                 }
                 Tag::Function => {
-                    self.painted(FUNCTION, format!("Fn::({:?})", ast));
+                    self.painted(FUNCTION, format!("Fn::({ast:?})"));
                     return;
                 }
                 Tag::String => {
@@ -111,7 +112,7 @@ impl<W: io::Write> AstWriter<'_, W> {
                     return;
                 }
                 Tag::Interpolated => {
-                    self.painted(VARIABLE, format!("Var::({:?})", ast));
+                    self.painted(VARIABLE, format!("Var::({ast:?})"));
                     return;
                 }
                 _ => {}
@@ -119,10 +120,10 @@ impl<W: io::Write> AstWriter<'_, W> {
         }
 
         if k == SyntaxKind::Ident {
-            self.painted(MARKED, format!("Marked::({:?})", ast));
+            self.painted(MARKED, format!("Marked::({ast:?})"));
             return;
         }
-        self.painted(MARKED, format!("Marked::{:?}", k));
+        self.painted(MARKED, format!("Marked::{k:?}"));
     }
 
     fn write_ast(&mut self, src: &Source, ast: &LinkedNode) {
